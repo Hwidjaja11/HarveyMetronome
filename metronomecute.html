@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Metronome</title>
+  <link rel="preconnect" href="https://googleapis.com">
+  <link rel="preconnect" href="https://gstatic.com" crossorigin>
+  <link href="https://googleapis.com/css2?family=Libre+Baskerville:ital,wght@0,400;0,700;1,400&display=swap" rel="stylesheet">
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      height: 100vh;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      background: transparent;
+      font-family: 'Libre Baskerville', 'Times New Roman', Georgia, serif;
+    }
+    .tempo-trigger {
+      background: transparent;
+      border: none;
+      outline: none;
+      padding: 12px 20px;
+      display: inline-flex;
+      align-items: center;
+      gap: 12px;
+      cursor: pointer;
+      user-select: none;
+      -webkit-tap-highlight-color: transparent;
+      transition: transform 0.12s ease;
+    }
+    .tempo-trigger:hover { transform: scale(1.04); }
+    .tempo-trigger:active { transform: scale(0.96); }
+    .note-stack {
+      position: relative;
+      width: 70px;
+      height: 110px;
+      flex-shrink: 0;
+    }
+    .note-layer {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      display: none;
+    }
+    .note-layer.active { display: block; }
+    .note-layer svg,
+    .note-layer img {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      display: block;
+    }
+    .tempo-text {
+      font-size: 48px;
+      color: #1e1e1e;
+      line-height: 1;
+      letter-spacing: -0.5px;
+    }
+    .tempo-text strong {
+      font-weight: 700;
+      font-family: 'Times New Roman', Times, serif;
+
+    }
+  </style>
+</head>
+<body>
+
+  <button id="tempoBtn" class="tempo-trigger" type="button" title="Click to Play / Pause">
+    <div class="note-stack">
+      <!-- IMAGE 1: STEM LEFT -->
+      <div id="noteLeft" class="note-layer active">
+        <!-- Replace <svg>...</svg> with: <img src="note-left.png" alt="Left" /> -->
+        <svg viewBox="0 0 80 120" xmlns="http://w3.org">
+          <g transform="rotate(-15 38 95)">
+            <rect x="44" y="14" width="7" height="82" rx="3.5" fill="#1e1e1e"/>
+            <ellipse cx="34" cy="94" rx="17" ry="12" transform="rotate(-20 34 94)" fill="#1e1e1e"/>
+          </g>
+        </svg>
+      </div>
+
+      <!-- IMAGE 2: STEM RIGHT -->
+      <div id="noteRight" class="note-layer">
+        <!-- Replace <svg>...</svg> with: <img src="note-right.png" alt="Right" /> -->
+        <svg viewBox="0 0 80 120" xmlns="http://w3.org">
+          <g transform="rotate(15 38 95)">
+            <rect x="44" y="14" width="7" height="82" rx="3.5" fill="#1e1e1e"/>
+            <ellipse cx="34" cy="94" rx="17" ry="12" transform="rotate(-20 34 94)" fill="#1e1e1e"/>
+          </g>
+        </svg>
+      </div>
+    </div>
+
+    <span class="tempo-text">= <strong id="bpmDisplay">62</strong></span>
+  </button>
+
+  <script>
+    // =========================================================================
+    // 🎵✨ CHANGE YOUR TEMPO (BPM) RIGHT HERE! ✨🎵
+    // =========================================================================
+    
+            const BPM = 62;       // <--- CHANGE THIS NUMBER (e.g., 62, 120, 300)
+    
+    // =========================================================================
+
+    const BEATS_PER_MEASURE = 4;
+    const SECONDS_PER_BEAT = 60.0 / BPM;
+
+    const tempoBtn = document.getElementById('tempoBtn');
+    const noteLeft = document.getElementById('noteLeft');
+    const noteRight = document.getElementById('noteRight');
+    const bpmDisplay = document.getElementById('bpmDisplay');
+
+    bpmDisplay.textContent = BPM;
+
+    let audioCtx = null;
+    let masterCompressor = null;
+    let clickBuffer = null;
+
+    let isPlaying = false;
+    let startTime = 0;
+    let nextBeatIndex = 0;
+    let schedulerTimer = null;
+    let visualFrameId = null;
+    let lastVisualSide = null;
+
+    function initAudio() {
+      if (!audioCtx) {
+        const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+        audioCtx = new AudioContextClass();
+
+        // Single reusable compressor prevents audio thread spikes
+        masterCompressor = audioCtx.createDynamicsCompressor();
+        masterCompressor.threshold.value = -6;
+        masterCompressor.knee.value = 0;
+        masterCompressor.ratio.value = 12;
+        masterCompressor.attack.value = 0.001;
+        masterCompressor.release.value = 0.05;
+        masterCompressor.connect(audioCtx.destination);
+
+        // Pre-render the dry click impulse once
+        const length = Math.floor(audioCtx.sampleRate * 0.012);
+        clickBuffer = audioCtx.createBuffer(1, length, audioCtx.sampleRate);
+        const data = clickBuffer.getChannelData(0);
+        for (let i = 0; i < length; i++) {
+          data[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / length, 3);
+        }
+      }
+      if (audioCtx.state === 'suspended') {
+        audioCtx.resume();
+      }
+    }
+
+    function scheduleClick(exactTime, isFirstBeat) {
+      const source = audioCtx.createBufferSource();
+      source.buffer = clickBuffer;
+
+      const filter = audioCtx.createBiquadFilter();
+      filter.type = 'bandpass';
+      filter.frequency.value = isFirstBeat ? 3800 : 1100;
+      filter.Q.value = isFirstBeat ? 1.8 : 1.1;
+
+      const gain = audioCtx.createGain();
+      gain.gain.value = isFirstBeat ? 6.0 : 2.2;
+
+      source.connect(filter);
+      filter.connect(gain);
+      gain.connect(masterCompressor);
+
+      source.start(exactTime);
+    }
+
+    // Locks every beat to exact multiples of SECONDS_PER_BEAT from startTime (zero cumulative drift)
+    function audioScheduler() {
+      const lookaheadSeconds = 0.25;
+      while (startTime + nextBeatIndex * SECONDS_PER_BEAT < audioCtx.currentTime + lookaheadSeconds) {
+        const beatTime = startTime + nextBeatIndex * SECONDS_PER_BEAT;
+        const isFirstBeat = (nextBeatIndex % BEATS_PER_MEASURE) === 0;
+        scheduleClick(beatTime, isFirstBeat);
+        nextBeatIndex++;
+      }
+    }
+
+    // Visual loop reads exact hardware audio clock so the image flips on the exact beat
+    function visualLoop() {
+      if (!isPlaying) return;
+
+      const elapsed = audioCtx.currentTime - startTime;
+      if (elapsed >= 0) {
+        const currentBeatNumber = Math.floor(elapsed / SECONDS_PER_BEAT);
+        const isLeftSide = (currentBeatNumber % 2) === 0;
+
+        if (isLeftSide !== lastVisualSide) {
+          noteLeft.classList.toggle('active', isLeftSide);
+          noteRight.classList.toggle('active', !isLeftSide);
+          lastVisualSide = isLeftSide;
+        }
+      }
+
+      visualFrameId = requestAnimationFrame(visualLoop);
+    }
+
+    tempoBtn.addEventListener('click', () => {
+      isPlaying = !isPlaying;
+
+      if (isPlaying) {
+        initAudio();
+        startTime = audioCtx.currentTime + 0.05;
+        nextBeatIndex = 0;
+        lastVisualSide = null;
+
+        audioScheduler();
+        schedulerTimer = setInterval(audioScheduler, 25);
+        visualFrameId = requestAnimationFrame(visualLoop);
+      } else {
+        clearInterval(schedulerTimer);
+        cancelAnimationFrame(visualFrameId);
+        noteLeft.classList.add('active');
+        noteRight.classList.remove('active');
+      }
+    });
+  </script>
+
+</body>
+</html>
